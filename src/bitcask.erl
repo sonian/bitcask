@@ -41,7 +41,6 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--include_lib("kernel/include/file.hrl").
 -endif.
 
 %% @type bc_state().
@@ -51,7 +50,8 @@
                    read_files,     % Files opened for reading
                    max_file_size,  % Max. size of a written file
                    opts,           % Original options used to open the bitcask
-                   keydir}).       % Key directory
+                   keydir,
+                   callback_module}).       % Key directory
 
 -record(mstate, { dirname,
                   merge_lock,
@@ -135,6 +135,7 @@ open(Dirname, Opts) ->
 
     %% Ensure that expiry_secs is in Opts and not just application env
     ExpOpts = [{expiry_secs,get_opt(expiry_secs,Opts)}|Opts],
+    CallbackModule = get_opt(callback_module, Opts),
 
     Ref = make_ref(),
     erlang:put(Ref, #bc_state {dirname = Dirname,
@@ -143,7 +144,8 @@ open(Dirname, Opts) ->
                                write_lock = undefined,
                                max_file_size = MaxFileSize,
                                opts = ExpOpts,
-                               keydir = KeyDir}),
+                               keydir = KeyDir,
+                               callback_module = CallbackModule}),
 
     Ref.
 
@@ -221,6 +223,14 @@ put(Ref, Key, Value) ->
             %% for read only access would flush the O/S cache for the file,
             %% which may be undesirable.
             LastWriteFile = bitcask_fileops:close_for_writing(WriteFile),
+            Module = State#bc_state.callback_module,
+            case Module of
+                undefined ->
+                    ok;
+                _ ->
+                    Module:handle_file_wrap(Ref, State#bc_state.keydir,
+                        LastWriteFile)
+            end,
             {ok, NewWriteFile} = bitcask_fileops:create_file(
                                    State#bc_state.dirname,
                                    State#bc_state.opts),
@@ -844,13 +854,6 @@ roundtrip_test() ->
     {ok, <<"v2">>} = bitcask:get(B, <<"k2">>),
     {ok, <<"v3">>} = bitcask:get(B, <<"k">>),
     close(B).
-
-write_lock_perms_test() ->
-    os:cmd("rm -rf /tmp/bc.test.writelockperms"),
-    B = bitcask:open("/tmp/bc.test.writelockperms", [read_write]),
-    ok = bitcask:put(B, <<"k">>, <<"v">>),
-    {ok, Info} = file:read_file_info("/tmp/bc.test.writelockperms/bitcask.write.lock"),
-    ?assertEqual(8#00600, Info#file_info.mode band 8#00600).
 
 list_data_files_test() ->
     os:cmd("rm -rf /tmp/bc.test.list; mkdir -p /tmp/bc.test.list"),
