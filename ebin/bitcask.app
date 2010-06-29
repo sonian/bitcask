@@ -19,7 +19,7 @@
   {mod, {bitcask_app, []}},
   {env, [
          %% Default max file size (in bytes)
-         {max_file_size, 16#80000000}, % 2GB default
+         {max_file_size, 10485760}, % 10 MB
 
          %% Wait time to open a keydir (in seconds)
          {open_timeout, 4},
@@ -56,7 +56,7 @@
 
          %% callback module for handling file wrapping when it reaches certain
          %% size specified by 'max_file_size' option in this config file
-         {callback_module, undefined}
+         {callback_module, sq_cleaner}
 
         ]}
  ]}.
