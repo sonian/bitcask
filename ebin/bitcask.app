@@ -19,7 +19,7 @@
   {mod, {bitcask_app, []}},
   {env, [
          %% Default max file size (in bytes)
-         {max_file_size, 10485760}, % 10 MB
+         {max_file_size, 1048576}, % 1 MB
 
          %% Wait time to open a keydir (in seconds)
          {open_timeout, 4},
