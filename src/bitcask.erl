@@ -246,8 +246,7 @@ put(Ref, Key, Value) ->
                 undefined ->
                     ok;
                 _ ->
-                    spawn(Module,handle_file_wrap,[Ref, State#bc_state.keydir,
-                        LastWriteFile])
+                    spawn(Module,handle_file_wrap,[LastWriteFile])
             end,
             {ok, NewWriteFile} = bitcask_fileops:create_file(
                                    State#bc_state.dirname,
