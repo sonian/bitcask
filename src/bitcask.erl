@@ -194,7 +194,8 @@ get(Ref, Key, TryNum) ->
         not_found ->
             not_found;
         E when is_record(E, bitcask_entry) ->
-            case E#bitcask_entry.tstamp < expiry_time(State#bc_state.opts) of
+            case E#bitcask_entry.tstamp < expiry_time(State#bc_state.opts)
+                andalso is_header(Key) of
                 true -> not_found;
                 false ->
                     %% HACK: Use a fully-qualified call to get_filestate/2 so that
@@ -325,7 +326,7 @@ fold(Ref, Fun, Acc0) ->
             {ok, Bloom} = ebloom:new(1000000,0.00003,Tseed), % arbitrary large bloom
             ExpiryTime = expiry_time(State#bc_state.opts),
             SubFun = fun(K,V,TStamp,{Offset,_Sz},Acc) ->
-                             case ebloom:contains(Bloom,K) orelse (TStamp < ExpiryTime) of
+                    case ebloom:contains(Bloom,K) orelse (is_header(K) andalso TStamp < ExpiryTime) of
                                  true ->
                                      Acc;
                                  false ->
@@ -816,69 +817,79 @@ inner_merge_write(K, V, Tstamp, State) ->
     
     State1#mstate { out_file = Outfile }.
 
+is_header(BitcaskKey) ->
+    {Bucket, Key} = binary_to_term(BitcaskKey),
+    case catch sq_utils:bucket_to_seconds(Bucket) of
+        {'EXIT', _} -> false;
+        _ -> true
+    end.
 
 out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, []) ->
     false;
-out_of_date(_Key, Tstamp, _FileId, _Pos, ExpiryTime, _KeyDirs)
-  when Tstamp < ExpiryTime ->
-    true;
+out_of_date(Key, Tstamp, _FileId, _Pos, ExpiryTime, _KeyDirs) when Tstamp < ExpiryTime ->
+    is_header(Key);
 out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, [KeyDir|Rest]) ->
-    case bitcask_nifs:keydir_get(KeyDir, Key) of
-        not_found ->
-            out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, Rest);
-
-        E when is_record(E, bitcask_entry) ->
-            if
-                E#bitcask_entry.tstamp == Tstamp ->
-                    %% Exact match. In this situation, we use the file
-                    %% id and offset as a tie breaker. The assumption
-                    %% is that the merge starts with the newest files
-                    %% first, thus we want data from the highest
-                    %% file_id and the highest offset in that file.
-                    if
-                        E#bitcask_entry.file_id > FileId ->
-                            true;
-
-                        E#bitcask_entry.file_id == FileId ->
-                            case E#bitcask_entry.offset > Offset of
-                                true ->
-                                    true;
-                                false ->
-                                    out_of_date(
-                                      Key, Tstamp, FileId, Pos, 
-                                      ExpiryTime, Rest)
-                            end;
-
-                        true ->
-                            %% At this point the following conditions are true:
-                            %% The file_id in the keydir is older (<) the file
-                            %% id we're currently merging...
-                            %%
-                            %% OR:
-                            %%
-                            %% The file_id in the keydir is the same (==) as the
-                            %% file we're merging BUT the offset the keydir has
-                            %% is older (<=) the offset we are currently
-                            %% processing.
-                            %%
-                            %% Thus, we are NOT out of date. Check the
-                            %% rest of the keydirs to ensure this
-                            %% holds true.
-                            out_of_date(Key, Tstamp, FileId, Pos,
-                                        ExpiryTime, Rest)
-                    end;
-
-                E#bitcask_entry.tstamp < Tstamp ->
-                    %% Not out of date -- check rest of the keydirs
+    case is_header(Key) of
+        true ->
+            case bitcask_nifs:keydir_get(KeyDir, Key) of
+                not_found ->
                     out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, Rest);
 
-                true ->
-                    %% Out of date!
-                    true
-            end;
+                E when is_record(E, bitcask_entry) ->
+                    if
+                        E#bitcask_entry.tstamp == Tstamp ->
+                            %% Exact match. In this situation, we use the file
+                            %% id and offset as a tie breaker. The assumption
+                            %% is that the merge starts with the newest files
+                            %% first, thus we want data from the highest
+                            %% file_id and the highest offset in that file.
+                            if
+                                E#bitcask_entry.file_id > FileId ->
+                                    true;
 
-        {error, Reason} ->
-            {error, Reason}
+                                E#bitcask_entry.file_id == FileId ->
+                                    case E#bitcask_entry.offset > Offset of
+                                        true ->
+                                            true;
+                                        false ->
+                                            out_of_date(
+                                                Key, Tstamp, FileId, Pos, 
+                                                ExpiryTime, Rest)
+                                    end;
+
+                                true ->
+                                    %% At this point the following conditions are true:
+                                    %% The file_id in the keydir is older (<) the file
+                                    %% id we're currently merging...
+                                    %%
+                                    %% OR:
+                                    %%
+                                    %% The file_id in the keydir is the same (==) as the
+                                    %% file we're merging BUT the offset the keydir has
+                                    %% is older (<=) the offset we are currently
+                                    %% processing.
+                                    %%
+                                    %% Thus, we are NOT out of date. Check the
+                                    %% rest of the keydirs to ensure this
+                                    %% holds true.
+                                    out_of_date(Key, Tstamp, FileId, Pos,
+                                        ExpiryTime, Rest)
+                            end;
+
+                        E#bitcask_entry.tstamp < Tstamp ->
+                            %% Not out of date -- check rest of the keydirs
+                            out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, Rest);
+
+                        true ->
+                            %% Out of date!
+                            true
+                    end;
+
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        false ->
+            false
     end.
 
 readable_files(Dirname) ->
