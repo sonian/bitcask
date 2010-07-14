@@ -212,7 +212,9 @@ get(Ref, Key, TryNum) ->
                                 {ok, _Key, ?TOMBSTONE} ->
                                     not_found;
                                 {ok, _Key, Value} ->
-                                    {ok, Value}
+                                    {ok, Value, {Filestate#filestate.filename,
+                                        E#bitcask_entry.offset,
+                                        E#bitcask_entry.total_sz}}
                             end
                     end
             end;
@@ -288,7 +290,7 @@ put(Ref, Key, Value) ->
                                  Size, Offset, Tstamp),
 
     put_state(Ref, State2#bc_state { write_file = WriteFile2 }),
-    ok.
+    {WriteFile2#filestate.filename, Offset, Size}.
 
 
 %% @doc Delete a key from a bitcask datastore.
@@ -818,7 +820,7 @@ inner_merge_write(K, V, Tstamp, State) ->
     State1#mstate { out_file = Outfile }.
 
 is_header(BitcaskKey) ->
-    {Bucket, Key} = binary_to_term(BitcaskKey),
+    {Bucket, _Key} = binary_to_term(BitcaskKey),
     case catch sq_utils:bucket_to_seconds(Bucket) of
         {'EXIT', _} -> false;
         _ -> true

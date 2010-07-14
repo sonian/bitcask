@@ -19,7 +19,7 @@
   {mod, {bitcask_app, []}},
   {env, [
          %% Default max file size (in bytes)
-         {max_file_size, 536870912}, % 512 MB
+         {max_file_size, 10485760}, % 512 MB
 
          %% Wait time to open a keydir (in seconds)
          {open_timeout, 4},
@@ -46,7 +46,7 @@
          %% by bitcask:needs_merge/1.
          %%
          {frag_threshold, 40},                  % >= 40% fragmentation
-         {dead_bytes_threshold, 134217728},     % Dead bytes > 128 MB
+         {dead_bytes_threshold, 33554432},     % Dead bytes > 128 MB
          {small_file_threshold, 10485760},      % File is < 10 MB
 
          %% Data expiration can be caused by setting this to a
