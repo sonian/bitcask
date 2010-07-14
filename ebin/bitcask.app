@@ -19,7 +19,7 @@
   {mod, {bitcask_app, []}},
   {env, [
          %% Default max file size (in bytes)
-         {max_file_size, 1048576}, % 1 MB
+         {max_file_size, 536870912}, % 512 MB
 
          %% Wait time to open a keydir (in seconds)
          {open_timeout, 4},
@@ -39,7 +39,7 @@
          %% values will cause bitcask:needs_merge/1 to return true.
          %%
          {frag_merge_trigger, 60},              % >= 60% fragmentation
-         {dead_bytes_merge_trigger, 536870912}, % Dead bytes > 512 MB
+         {dead_bytes_merge_trigger, 134217728}, % Dead bytes > 512 MB
 
          %% Merge thresholds. Files exceeding ANY of these values
          %% will be included in the list of files marked for merging
