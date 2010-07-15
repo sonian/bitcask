@@ -39,15 +39,15 @@
          %% values will cause bitcask:needs_merge/1 to return true.
          %%
          {frag_merge_trigger, 60},              % >= 60% fragmentation
-         {dead_bytes_merge_trigger, 134217728}, % Dead bytes > 512 MB
+         {dead_bytes_merge_trigger, 2500000}, % Dead bytes > 2.5 MB
 
          %% Merge thresholds. Files exceeding ANY of these values
          %% will be included in the list of files marked for merging
          %% by bitcask:needs_merge/1.
          %%
          {frag_threshold, 40},                  % >= 40% fragmentation
-         {dead_bytes_threshold, 33554432},     % Dead bytes > 128 MB
-         {small_file_threshold, 10485760},      % File is < 10 MB
+         {dead_bytes_threshold, 1200000},     % Dead bytes > 1.2 MB
+         {small_file_threshold, 104850},      % File is < 10 MB
 
          %% Data expiration can be caused by setting this to a
          %% positive value.  If so, items older than the value
