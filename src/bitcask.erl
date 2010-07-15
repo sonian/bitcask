@@ -826,7 +826,7 @@ is_sq_doc(BitcaskKey) ->
             true;
         Val ->
             %% integer names insiede strings are headers
-            case list_to_integer(Val) of
+            case catch list_to_integer(Val) of
                 {'EXIT', _} -> false;
                 %% users
                 _ -> true
