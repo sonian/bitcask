@@ -242,13 +242,13 @@ put(Ref, Key, Value) ->
             %% for read only access would flush the O/S cache for the file,
             %% which may be undesirable.
             LastWriteFile = bitcask_fileops:close_for_writing(WriteFile),
-            Module = State#bc_state.callback_module,
-            case Module of
-                undefined ->
-                    ok;
-                _ ->
-                    spawn(Module,handle_file_wrap,[LastWriteFile])
-            end,
+            %% Module = State#bc_state.callback_module,
+            %%             case Module of
+            %%                 undefined ->
+            %%                     ok;
+            %%                 _ ->
+            %%                     spawn(Module,handle_file_wrap,[LastWriteFile])
+            %%             end,
             {ok, NewWriteFile} = bitcask_fileops:create_file(
                                    State#bc_state.dirname,
                                    State#bc_state.opts),
