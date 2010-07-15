@@ -195,7 +195,7 @@ get(Ref, Key, TryNum) ->
             not_found;
         E when is_record(E, bitcask_entry) ->
             case E#bitcask_entry.tstamp < expiry_time(State#bc_state.opts)
-                andalso is_header(Key) of
+                andalso is_sq_doc(Key) of
                 true -> not_found;
                 false ->
                     %% HACK: Use a fully-qualified call to get_filestate/2 so that
@@ -326,7 +326,7 @@ fold(Ref, Fun, Acc0) ->
             {ok, Bloom} = ebloom:new(1000000,0.00003,Tseed), % arbitrary large bloom
             ExpiryTime = expiry_time(State#bc_state.opts),
             SubFun = fun(K,V,TStamp,{Offset,_Sz},Acc) ->
-                    case ebloom:contains(Bloom,K) orelse (is_header(K) andalso TStamp < ExpiryTime) of
+                    case ebloom:contains(Bloom,K) orelse (is_sq_doc(K) andalso TStamp < ExpiryTime) of
                                  true ->
                                      Acc;
                                  false ->
@@ -817,19 +817,28 @@ inner_merge_write(K, V, Tstamp, State) ->
     
     State1#mstate { out_file = Outfile }.
 
-is_header(BitcaskKey) ->
-    {Bucket, Key} = binary_to_term(BitcaskKey),
-    case catch sq_utils:bucket_to_seconds(Bucket) of
-        {'EXIT', _} -> false;
-        _ -> true
+is_sq_doc(BitcaskKey) ->
+    {Bucket, _Key} = binary_to_term(BitcaskKey),
+    BucketString = binary_to_list(Bucket),
+    case BucketString of
+        %% "body1234567" TODO: improve bucket names!
+        [98,111,100,121|_StringTail] ->
+            true;
+        Val ->
+            %% integer names insiede strings are headers
+            case list_to_integer(Val) of
+                {'EXIT', _} -> false;
+                %% users
+                _ -> true
+            end
     end.
 
 out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, []) ->
     false;
 out_of_date(Key, Tstamp, _FileId, _Pos, ExpiryTime, _KeyDirs) when Tstamp < ExpiryTime ->
-    is_header(Key);
+    is_sq_doc(Key);
 out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, [KeyDir|Rest]) ->
-    case is_header(Key) of
+    case is_sq_doc(Key) of
         true ->
             case bitcask_nifs:keydir_get(KeyDir, Key) of
                 not_found ->
