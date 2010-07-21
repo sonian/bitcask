@@ -52,7 +52,7 @@
          %% Data expiration can be caused by setting this to a
          %% positive value.  If so, items older than the value
          %% will be discarded.
-         {expiry_secs, 300},
+         {expiry_secs, 36000},
 
          %% callback module for handling file wrapping when it reaches certain
          %% size specified by 'max_file_size' option in this config file
