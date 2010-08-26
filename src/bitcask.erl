@@ -30,6 +30,7 @@
          delete/2,
          sync/1,
          list_keys/1,
+         fold_keys/3,
          fold/3,
          merge/1, merge/2, merge/3,
          needs_merge/1,
@@ -48,6 +49,7 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
 -endif.
 
 %% @type bc_state().
@@ -57,8 +59,7 @@
                    read_files,     % Files opened for reading
                    max_file_size,  % Max. size of a written file
                    opts,           % Original options used to open the bitcask
-                   keydir,
-                   callback_module}).       % Key directory
+                   keydir}).       % Key directory
 
 -record(mstate, { dirname,
                   merge_lock,
@@ -67,7 +68,7 @@
                   out_file,
                   merged_files,
                   partial,
-                  live_keydir,
+                  live_keydir :: reference(),
                   hint_keydir,
                   del_keydir,
                   expiry_time,
@@ -79,12 +80,12 @@
 %% * A merge lock - bitcask.merge.lock (Optional)
 
 %% @doc Open a new or existing bitcask datastore for read-only access.
--spec open(Dirname::string()) -> reference() | {error, any()}.
+-spec open(Dirname::string()) -> reference().
 open(Dirname) ->
     open(Dirname, []).
 
 %% @doc Open a new or existing bitcask datastore with additional options.
--spec open(Dirname::string(), Opts::[_]) -> reference() | {error, any()}.
+-spec open(Dirname::string(), Opts::[_]) -> reference().
 open(Dirname, Opts) ->
     %% Make sure bitcask app is started so we can pull defaults from env
     ok = start_app(),
@@ -143,7 +144,6 @@ open(Dirname, Opts) ->
 
     %% Ensure that expiry_secs is in Opts and not just application env
     ExpOpts = [{expiry_secs,get_opt(expiry_secs,Opts)}|Opts],
-    CallbackModule = get_opt(callback_module, Opts),
 
     Ref = make_ref(),
     erlang:put(Ref, #bc_state {dirname = Dirname,
@@ -152,8 +152,7 @@ open(Dirname, Opts) ->
                                write_lock = undefined,
                                max_file_size = MaxFileSize,
                                opts = ExpOpts,
-                               keydir = KeyDir,
-                               callback_module = CallbackModule}),
+                               keydir = KeyDir}),
 
     Ref.
 
@@ -187,6 +186,8 @@ close(Ref) ->
 get(Ref, Key) ->
     get(Ref, Key, 2).
 
+-spec get(reference(), binary(), integer()) ->
+                 not_found | {ok, Value::binary()} | {error, Err::term()}.
 get(_Ref, _Key, 0) -> {error, nofile};
 get(Ref, Key, TryNum) ->
     State = get_state(Ref),
@@ -215,13 +216,11 @@ get(Ref, Key, TryNum) ->
                                     {ok, Value}
                             end
                     end
-            end;
-        {error, Reason} ->
-            {error, Reason}
+            end
     end.
 
 %% @doc Store a key and value in a bitcase datastore.
--spec put(reference(), Key::binary(), Value::binary()) -> ok | {error, any()}.
+-spec put(reference(), Key::binary(), Value::binary()) -> ok.
 put(Ref, Key, Value) ->
     #bc_state { write_file = WriteFile } = State = get_state(Ref),
 
@@ -242,13 +241,6 @@ put(Ref, Key, Value) ->
             %% for read only access would flush the O/S cache for the file,
             %% which may be undesirable.
             LastWriteFile = bitcask_fileops:close_for_writing(WriteFile),
-            %% Module = State#bc_state.callback_module,
-            %%             case Module of
-            %%                 undefined ->
-            %%                     ok;
-            %%                 _ ->
-            %%                     spawn(Module,handle_file_wrap,[LastWriteFile])
-            %%             end,
             {ok, NewWriteFile} = bitcask_fileops:create_file(
                                    State#bc_state.dirname,
                                    State#bc_state.opts),
@@ -292,7 +284,7 @@ put(Ref, Key, Value) ->
 
 
 %% @doc Delete a key from a bitcask datastore.
--spec delete(reference(), Key::binary()) -> ok | {error, any()}.
+-spec delete(reference(), Key::binary()) -> ok.
 delete(Ref, Key) ->
     put(Ref, Key, ?TOMBSTONE).
 
@@ -312,11 +304,40 @@ sync(Ref) ->
 
 %% @doc List all keys in a bitcask datastore.
 -spec list_keys(reference()) -> [Key::binary()] | {error, any()}.
-list_keys(Ref) -> fold(Ref, fun(K,_V,Acc) -> [K|Acc] end, []).
+list_keys(Ref) -> 
+    fold_keys(Ref, fun(#bitcask_entry{key=K},Acc) -> [K|Acc] end, []).
+
+%% @doc Fold over all keys in a bitcask datastore.
+%% Must be able to understand the bitcask_entry record form.
+-spec fold_keys(reference(), Fun::fun(), Acc::term()) ->
+                                                       term() | {error, any()}.
+fold_keys(Ref, Fun, Acc0) ->
+    %% Fun should be of the form F(#bitcask_entry, A) -> A
+    ExpiryTime = expiry_time((get_state(Ref))#bc_state.opts),
+    RealFun = fun(BCEntry, Acc) ->
+        Key = BCEntry#bitcask_entry.key,
+        case BCEntry#bitcask_entry.tstamp < ExpiryTime of
+            true ->
+                Acc;
+            false ->
+                TSize = size(?TOMBSTONE),
+                case BCEntry#bitcask_entry.total_sz -
+                            (?HEADER_SIZE + size(Key)) of
+                    TSize ->  % might be a deleted record, so check
+                        case ?MODULE:get(Ref, Key) of
+                            not_found -> Acc;
+                            _ -> Fun(BCEntry, Acc)
+                        end;
+                    _ ->
+                        Fun(BCEntry, Acc)
+                end
+        end
+    end,
+    bitcask_nifs:keydir_fold((get_state(Ref))#bc_state.keydir, RealFun, Acc0).
 
 %% @doc fold over all K/V pairs in a bitcask datastore.
 %% Fun is expected to take F(K,V,Acc0) -> Acc
--spec fold(reference(), fun(), any()) -> any() | {error, any()}.
+-spec fold(reference(), fun((binary(), binary(), any()) -> any()), any()) -> any() | {error, any()}.
 fold(Ref, Fun, Acc0) ->
     State = get_state(Ref),
 
@@ -346,9 +367,7 @@ fold(Ref, Fun, Acc0) ->
                                                          false ->
                                                              Fun(K,V,Acc)
                                                      end
-                                             end;
-                                         {error,Reason} ->
-                                             {error,Reason}
+                                             end
                                      end
                              end
                      end,
@@ -400,18 +419,19 @@ subfold(SubFun,[FD | Rest],Acc0) ->
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
--spec merge(Dirname::string()) -> ok | {error, any()}.
+-spec merge(Dirname::string()) -> ok.
 merge(Dirname) ->
     merge(Dirname, [], readable_files(Dirname)).
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
+-spec merge(Dirname::string(), Opts::[_]) -> ok.
 merge(Dirname, Opts) ->
     merge(Dirname, Opts, readable_files(Dirname)).
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
--spec merge(Dirname::string(), Opts::[_], FilesToMerge::[string()]) -> ok | {error, any()}.
+-spec merge(Dirname::string(), Opts::[_], FilesToMerge::[string()]) -> ok.
 merge(_Dirname, _Opts, []) ->
     ok;
 merge(Dirname, Opts, FilesToMerge0) ->
@@ -423,15 +443,12 @@ merge(Dirname, Opts, FilesToMerge0) ->
     %% list of files.
     FilesToMerge = [F || F <- FilesToMerge0,
                          filelib:is_file(F)],
-    case FilesToMerge of
-        [] ->
-            %% None of the files to merge actually exist!
-            throw({error, no_files_to_merge});
+    merge1(Dirname, Opts, FilesToMerge).
 
-        _ ->
-            ok
-    end,
-
+%% Inner merge function, assumes that bitcask is running and all files exist.
+merge1(_Dirname, _Opts, []) ->
+    ok;
+merge1(Dirname, Opts, FilesToMerge) ->
     %% Test to see if this is a complete or partial merge
     Partial = not(lists:usort(readable_files(Dirname)) == 
                   lists:usort(FilesToMerge)),
@@ -525,6 +542,7 @@ merge(Dirname, Opts, FilesToMerge0) ->
      end || F <- State#mstate.input_files],
     ok = bitcask_lockops:release(Lock).
 
+-spec needs_merge(reference()) -> {true, [string()]} | false.
 needs_merge(Ref) ->
     State = get_state(Ref),
     {_KeyCount, Summary} = status(Ref),
@@ -581,6 +599,7 @@ needs_merge(Ref) ->
             false
     end.
 
+-spec status(reference()) -> {integer(), [{string(), integer(), integer(), integer()}]}.
 status(Ref) ->
     State = get_state(Ref),
 
@@ -698,9 +717,7 @@ wait_for_keydir(Name, MillisToWait) ->
         {error, not_ready} ->
             timer:sleep(100),
             case MillisToWait of
-                infinity ->
-                    wait_for_keydir(Name, infinity);
-                Value when Value =< 0 ->
+                Value when is_integer(Value), Value =< 0 -> %% avoids 'infinity'!
                     timeout;
                 _ ->
                     wait_for_keydir(Name, MillisToWait - 100)
@@ -749,9 +766,11 @@ merge_files(#mstate { input_files = [File | Rest]} = State) ->
     merge_files(State1#mstate { input_files = Rest }).
 
 merge_single_entry(K, V, Tstamp, FileId, {Offset, _} = Pos, State) ->
-    case out_of_date(K, Tstamp, FileId, Pos, State#mstate.expiry_time,
+    case out_of_date(K, Tstamp, FileId, Pos, State#mstate.expiry_time, false,
                      [State#mstate.live_keydir, State#mstate.del_keydir]) of
         true ->
+            bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
+                                       Tstamp, FileId, Offset),
             State;
         false ->
             case (V =:= ?TOMBSTONE) of
@@ -765,7 +784,7 @@ merge_single_entry(K, V, Tstamp, FileId, {Offset, _} = Pos, State) ->
                     %% tstamp/fileid we have matches the current
                     %% entry.
                     bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
-                                               Tstamp, FileId),
+                                               Tstamp, FileId, Offset),
 
                     case State#mstate.partial of
                         true -> inner_merge_write(K, V, Tstamp, State);
@@ -776,6 +795,8 @@ merge_single_entry(K, V, Tstamp, FileId, {Offset, _} = Pos, State) ->
                     inner_merge_write(K, V, Tstamp, State)
             end
     end.
+
+-spec inner_merge_write(binary(), binary(), integer(), #mstate{}) -> #mstate{}.
 
 inner_merge_write(K, V, Tstamp, State) ->
     %% write a single item while inside the merge process
@@ -821,8 +842,8 @@ is_sq_doc(BitcaskKey) ->
     {Bucket, _Key} = binary_to_term(BitcaskKey),
     BucketString = binary_to_list(Bucket),
     case BucketString of
-        %% "body1234567" TODO: improve bucket names!
-        [98,111,100,121|_StringTail] ->
+        %% TODO: improve bucket names!
+        "body"++_1234567 ->
             true;
         Val ->
             %% integer names insiede strings are headers
@@ -833,16 +854,20 @@ is_sq_doc(BitcaskKey) ->
             end
     end.
 
-out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, []) ->
-    false;
-out_of_date(Key, Tstamp, _FileId, _Pos, ExpiryTime, _KeyDirs) when Tstamp < ExpiryTime ->
+out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, EverFound, []) ->
+    %% if we ever found it, and non of the entries were out of date,
+    %% then it's not out of date
+    EverFound == false;
+out_of_date(Key, Tstamp, _FileId, _Pos, ExpiryTime, _EverFound, _KeyDirs)
+    when Tstamp < ExpiryTime ->
     is_sq_doc(Key);
-out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, [KeyDir|Rest]) ->
+out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, EverFound,
+    [KeyDir|Rest]) ->
     case is_sq_doc(Key) of
         true ->
             case bitcask_nifs:keydir_get(KeyDir, Key) of
                 not_found ->
-                    out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, Rest);
+            out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, EverFound, Rest);
 
                 E when is_record(E, bitcask_entry) ->
                     if
@@ -863,7 +888,7 @@ out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, [KeyDir|Rest]) ->
                                         false ->
                                             out_of_date(
                                                 Key, Tstamp, FileId, Pos, 
-                                                ExpiryTime, Rest)
+                                      ExpiryTime, true, Rest)
                                     end;
 
                                 true ->
@@ -882,20 +907,18 @@ out_of_date(Key, Tstamp, FileId, {Offset,_} = Pos, ExpiryTime, [KeyDir|Rest]) ->
                                     %% rest of the keydirs to ensure this
                                     %% holds true.
                                     out_of_date(Key, Tstamp, FileId, Pos,
-                                        ExpiryTime, Rest)
+                                        ExpiryTime, true, Rest)
                             end;
 
                         E#bitcask_entry.tstamp < Tstamp ->
                             %% Not out of date -- check rest of the keydirs
-                            out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, Rest);
+                    out_of_date(Key, Tstamp, FileId, Pos,
+                                ExpiryTime, true, Rest);
 
                         true ->
                             %% Out of date!
                             true
-                    end;
-
-                {error, Reason} ->
-                    {error, Reason}
+                    end
             end;
         false ->
             false
@@ -949,6 +972,13 @@ roundtrip_test() ->
     {ok, <<"v2">>} = bitcask:get(B, <<"k2">>),
     {ok, <<"v3">>} = bitcask:get(B, <<"k">>),
     close(B).
+
+write_lock_perms_test() ->
+    os:cmd("rm -rf /tmp/bc.test.writelockperms"),
+    B = bitcask:open("/tmp/bc.test.writelockperms", [read_write]),
+    ok = bitcask:put(B, <<"k">>, <<"v">>),
+    {ok, Info} = file:read_file_info("/tmp/bc.test.writelockperms/bitcask.write.lock"),
+    ?assertEqual(8#00600, Info#file_info.mode band 8#00600).
 
 list_data_files_test() ->
     os:cmd("rm -rf /tmp/bc.test.list; mkdir -p /tmp/bc.test.list"),
@@ -1050,20 +1080,20 @@ list_keys_test() ->
     {ok, <<"v3">>} = bitcask:get(B, <<"k">>),
     ok = bitcask:delete(B,<<"k">>),
     ok = bitcask:put(B, <<"k7">>,<<"v7">>),
-    true = ([<<"k7">>,<<"k2">>] =:= bitcask:list_keys(B)),
+    true = ([<<"k2">>,<<"k7">>] =:= lists:sort(bitcask:list_keys(B))),
     close(B),
     ok.
 
 expire_test() ->
     os:cmd("rm -rf /tmp/bc.test.expire"),
-    B = bitcask:open("/tmp/bc.test.expire", [read_write,{expiry_secs,2}]),
+    B = bitcask:open("/tmp/bc.test.expire", [read_write,{expiry_secs,1}]),
     ok = bitcask:put(B,<<"k">>,<<"v">>),
     {ok, <<"v">>} = bitcask:get(B,<<"k">>),
     ok = bitcask:put(B, <<"k2">>, <<"v2">>),
     ok = bitcask:put(B, <<"k">>,<<"v3">>),
     {ok, <<"v2">>} = bitcask:get(B, <<"k2">>),
     {ok, <<"v3">>} = bitcask:get(B, <<"k">>),
-    timer:sleep(3000),
+    timer:sleep(2000),
     ok = bitcask:put(B, <<"k7">>,<<"v7">>),
     true = ([<<"k7">>] =:= bitcask:list_keys(B)),
     close(B),
@@ -1076,10 +1106,10 @@ expire_merge_test() ->
                        default_dataset())),
 
     %% Wait for it all to expire
-    timer:sleep(3000),
+    timer:sleep(2000),
 
     %% Merge everything
-    ok = merge("/tmp/bc.test.mergeexpire",[{expiry_secs,2}]),
+    ok = merge("/tmp/bc.test.mergeexpire",[{expiry_secs,1}]),
 
     %% Verify we've now only got one file
     1 = length(readable_files("/tmp/bc.test.mergeexpire")),
@@ -1180,6 +1210,98 @@ delete_partial_merge_test() ->
     A = bitcask:list_keys(B2),
     close(B2),
 
+    ok.
+
+corrupt_file_test() ->
+    os:cmd("rm -rf /tmp/bc.test.corrupt"),
+    B1 = bitcask:open("/tmp/bc.test.corrupt", [read_write]),
+    ok = bitcask:put(B1,<<"k">>,<<"v">>),
+    {ok, <<"v">>} = bitcask:get(B1,<<"k">>),
+    close(B1),
+
+    %% write bogus data at end of hintfile, verify non-crash
+    os:cmd("rm -rf /tmp/bc.test.corrupt.hint"),
+    os:cmd("mkdir /tmp/bc.test.corrupt.hint"),
+    os:cmd("cp -r /tmp/bc.test.corrupt/*hint /tmp/bc.test.corrupt.hint/100.bitcask.hint"),
+    os:cmd("cp -r /tmp/bc.test.corrupt/*data /tmp/bc.test.corrupt.hint/100.bitcask.data"),
+    HFN = "/tmp/bc.test.corrupt.hint/100.bitcask.hint",
+    {ok, HFD} = file:open(HFN, [append, raw, binary]),
+    ok = file:write(HFD, <<"1">>),
+    file:close(HFD),    
+    B2 = bitcask:open("/tmp/bc.test.corrupt.hint"),
+    {ok, <<"v">>} = bitcask:get(B2,<<"k">>),
+    close(B2),
+
+    %% write bogus data at end of datafile, no hintfile, verify non-crash
+    os:cmd("rm -rf /tmp/bc.test.corrupt.data"),
+    os:cmd("mkdir /tmp/bc.test.corrupt.data"),
+    os:cmd("cp -r /tmp/bc.test.corrupt/*data /tmp/bc.test.corrupt.data/100.bitcask.data"),
+    DFN = "/tmp/bc.test.corrupt.data/100.bitcask.data",
+    {ok, DFD} = file:open(DFN, [append, raw, binary]),
+    ok = file:write(DFD, <<"2">>),
+    file:close(DFD),    
+    B3 = bitcask:open("/tmp/bc.test.corrupt.data"),
+    {ok, <<"v">>} = bitcask:get(B3,<<"k">>),
+    close(B3),
+
+    %% as above, but more than just headersize data
+    os:cmd("rm -rf /tmp/bc.test.corrupt.data2"),
+    os:cmd("mkdir /tmp/bc.test.corrupt.data2"),
+    os:cmd("cp -r /tmp/bc.test.corrupt/*data /tmp/bc.test.corrupt.data2/100.bitcask.data"),
+    D2FN = "/tmp/bc.test.corrupt.data2/100.bitcask.data",
+    {ok, D2FD} = file:open(D2FN, [append, raw, binary]),
+    ok = file:write(D2FD, <<"123456789012345">>),
+    file:close(D2FD),    
+    B4 = bitcask:open("/tmp/bc.test.corrupt.data2"),
+    {ok, <<"v">>} = bitcask:get(B4,<<"k">>),
+    close(B4),
+
+    ok.
+
+testhelper_keydir_count(B) ->
+    KD = (get_state(B))#bc_state.keydir,
+    {KeyCount,_,_} = bitcask_nifs:keydir_info(KD),
+    KeyCount.
+    
+expire_keydir_test() ->
+    %% Initialize dataset with max_file_size set to 1 so that each file will
+    %% only contain a single key.
+    close(init_dataset("/tmp/bc.test.mergeexpirekeydir", [{max_file_size, 1}],
+                       default_dataset())),
+
+    KDB = bitcask:open("/tmp/bc.test.mergeexpirekeydir"),
+
+    %% three keys in the keydir now
+    3 = testhelper_keydir_count(KDB),
+
+    %% Wait for it all to expire
+    timer:sleep(2000),
+
+    %% Merge everything
+    ok = merge("/tmp/bc.test.mergeexpirekeydir",[{expiry_secs,1}]),
+
+    %% should be no keys in the keydir now
+    0 = testhelper_keydir_count(KDB),
+
+    bitcask:close(KDB),
+    ok.
+
+delete_keydir_test() ->
+    close(init_dataset("/tmp/bc.test.deletekeydir", [],
+                       default_dataset())),
+
+    KDB = bitcask:open("/tmp/bc.test.deletekeydir", [read_write]),
+
+    %% three keys in the keydir now
+    3 = testhelper_keydir_count(KDB),
+
+    %% Delete something
+    ok = bitcask:delete(KDB, <<"k">>),
+
+    %% should be 2 keys in the keydir now
+    2 = testhelper_keydir_count(KDB),
+
+    bitcask:close(KDB),
     ok.
 
 -endif.
