@@ -840,18 +840,12 @@ inner_merge_write(K, V, Tstamp, State) ->
 
 is_sq_doc(BitcaskKey) ->
     {Bucket, _Key} = binary_to_term(BitcaskKey),
-    BucketString = binary_to_list(Bucket),
-    case BucketString of
-        %% TODO: improve bucket names!
-        "body"++_1234567 ->
-            true;
-        Val ->
-            %% integer names insiede strings are headers
-            case catch list_to_integer(Val) of
-                {'EXIT', _} -> false;
-                %% users
-                _ -> true
-            end
+    case Bucket of
+        <<"headers">> -> true;
+        <<"bodies">> -> true;
+        <<"emails">> -> true;
+        _ ->
+            false
     end.
 
 out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, EverFound, []) ->
