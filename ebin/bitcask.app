@@ -19,7 +19,7 @@
   {mod, {bitcask_app, []}},
   {env, [
          %% Default max file size (in bytes)
-         {max_file_size, 536870912}, % 512 MB
+         {max_file_size, 16#80000000}, % 2GB default
 
          %% Wait time to open a keydir (in seconds)
          {open_timeout, 4},
@@ -39,7 +39,7 @@
          %% values will cause bitcask:needs_merge/1 to return true.
          %%
          {frag_merge_trigger, 60},              % >= 60% fragmentation
-         {dead_bytes_merge_trigger, 134217728}, % Dead bytes > 512 MB
+         {dead_bytes_merge_trigger, 536870912}, % Dead bytes > 512 MB
 
          %% Merge thresholds. Files exceeding ANY of these values
          %% will be included in the list of files marked for merging
@@ -52,7 +52,7 @@
          %% Data expiration can be caused by setting this to a
          %% positive value.  If so, items older than the value
          %% will be discarded.
-         {expiry_secs, 1814400}, % 3 weeks
+         {expiry_secs, 180},
 
          %% callback module for handling file wrapping when it reaches certain
          %% size specified by 'max_file_size' option in this config file
